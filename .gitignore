@@ -1,1 +1,4 @@
 __pycache__/
+wandb
+all_models/
+results/checkpoints/

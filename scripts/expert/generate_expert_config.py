@@ -30,9 +30,10 @@ def get_summary(files):
                 expert_ids, expert_weights = parse_line(line)
                 np.add.at(gate_scores[layer_id], expert_ids, expert_weights)
                 np.add.at(token_scores[layer_id], expert_ids, np.ones_like(expert_weights) / TOP_K)
-
-    gate_scores = gate_scores / np.sum(gate_scores, axis=0)
-    token_scores = token_scores / np.sum(token_scores, axis=0)
+    
+    total = sum(token_scores[0])
+    gate_scores = gate_scores / total
+    token_scores = token_scores / total
 
     summary = {"token_scores": token_scores, "gate_scores": gate_scores}
     summary = {k: {str(i+1): {str(j): round(v, 4) for j, v in enumerate(l)} for i, l in enumerate(v)} for k, v in summary.items()}
@@ -64,7 +65,6 @@ if __name__ == "__main__":
     for rank in [i for i in os.listdir(args.expert_scores_dir) if 'rank' in i]:
         for file in os.listdir(os.path.join(args.expert_scores_dir, rank)):
             file_names.append([rank, file])
-
 
     summary_file = os.path.join(args.expert_scores_dir, "summary.json")
     summary = get_summary(file_names)

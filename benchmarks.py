@@ -55,9 +55,8 @@ class GPT4Evaluator(BaseEvaluator):
     def __init__(self, dataset, config):
         super().__init__(dataset, config)
         import openai
-        self.client = openai.AzureOpenAI(
-            api_key=config['openai_api_key'],
-            api_version="2024-02-15-preview"
+        self.client = openai.OpenAI(
+            api_key=config['openai_api_key']
         )
 
     def query_gpt4(self, text):

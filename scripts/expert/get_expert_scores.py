@@ -8,7 +8,7 @@ from utils import get_formatted_input_and_target
 import torch.multiprocessing as mp
 from itertools import accumulate
 from accelerate import dispatch_model
-
+from tqdm import tqdm
 
 def infer_auto_device_map(model, pp_splits, visible_devices):
     assert len(pp_splits) == len(visible_devices)
@@ -27,8 +27,10 @@ def infer_auto_device_map(model, pp_splits, visible_devices):
     return device_map
 
 
-def eval_expert(rank, args, model, dataset):
+def eval_expert(rank, args, dataset):
     try:
+        model = AutoModelForCausalLM.from_pretrained(args.base_model_path, trust_remote_code=True, torch_dtype=torch.bfloat16) # not using tokenizer here to aviod deadlock
+        model.config.log_expert_weights = True
         print(f"Rank {rank} starting expert evaluation...", flush=True)
         tokenizer = AutoTokenizer.from_pretrained(args.base_model_path)
         visible_devices = list(range(rank * args.gpus_per_rank, (rank + 1) * args.gpus_per_rank))
@@ -39,12 +41,15 @@ def eval_expert(rank, args, model, dataset):
         os.makedirs(os.path.join(args.output_dir, f"rank_{rank}"), exist_ok=True)
         done_tokens = 0
         cur_dataset = dataset[rank::args.world_size]
+        pbar = tqdm(total=n_sample_tokens, desc=f"Rank {rank} processing tokens", position=rank)
         for instance in cur_dataset:
             input_ids, target_ids = get_formatted_input_and_target(instance['messages'], tokenizer, -100)
             model(input_ids=torch.tensor(input_ids).unsqueeze(0), labels=torch.tensor(target_ids).unsqueeze(0))
             done_tokens += len(input_ids)
+            pbar.update(len(input_ids))
             if done_tokens >= n_sample_tokens:
                 break
+        pbar.close()
 
 
     except Exception as e:
@@ -64,15 +69,10 @@ if __name__ == "__main__":
     random.seed(5934875)
 
 
-    print("Loading base model...")
-    model = AutoModelForCausalLM.from_pretrained(args.base_model_path, trust_remote_code=True, torch_dtype=torch.bfloat16) # not using tokenizer here to aviod deadlock
-    model.config.log_expert_weights = True
-
-
     print(f"Running expert evaluation on {args.eval_dataset}...")
     dataset = [json.loads(i) for i in open(f"datasets/train/{args.eval_dataset}.jsonl").readlines()]
     random.shuffle(dataset)
 
 
     print("Start Evaluating...")
-    mp.spawn(eval_expert, args=(args, model, dataset), nprocs=args.world_size, join=True)
+    mp.spawn(eval_expert, args=(args, dataset), nprocs=args.world_size, join=True)

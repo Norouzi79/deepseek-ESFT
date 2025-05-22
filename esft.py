@@ -116,12 +116,41 @@ def load_base_model(base_model_path):
 
     return model, tokenizer
 
+def _get_expert_id(key):
+    "input: model.layers.25.mlp.experts.10.xx.xx, output: ('25', 10)"
+    return str(key.split(".")[2]), int(key.split(".")[5])
+
+def _build_expert_dict(expert_list):
+    expert_dict = {}
+    for layer, expert in expert_list:
+        if layer not in expert_dict:
+            expert_dict[layer] = []
+        expert_dict[layer].append(expert)
+    for layer in expert_dict:
+        expert_dict[layer] = sorted(list(set(expert_dict[layer])))
+    return expert_dict
+
+def _dict_equal(dict1, dict2):
+    if set(dict1.keys()) != set(dict2.keys()):
+        return False
+    else:
+        keys = set(dict1.keys())
+        return all([sorted(tuple(dict1[k])) == sorted(tuple(dict2[k])) for k in keys])
+
 def add_adapter(base_model, adapter_dir, return_original_states=False, expert_config=None):
     if expert_config is not None:
         adapter_config = json.load(open(expert_config))
     else:
         adapter_config = json.load(open(adapter_dir + "/expert_cfg.json"))
     adapter_state_dict = load_state_dict(adapter_dir)
+    expert_in_param = list([_get_expert_id(i) for i in adapter_state_dict.keys() if "expert" in i])
+    # expert_in_param: [('1', 8), ('1', 9), ('2', 0), ('2', 1), ('2', 2), ('2', 3), ('2', 4), ('2', 5), ('2', 6), ('2', 7)]
+    # expert_in_param_dict: {'1': [8, 9], '2': [0, 1, 2, 3, 4, 5, 6, 7]}
+    expert_in_param_dict = _build_expert_dict(expert_in_param)
+    if not _dict_equal(adapter_config['experts'], expert_in_param_dict):
+        print(adapter_config['experts'])
+        print(expert_in_param_dict)
+        raise ValueError("expert_config and expert_in_param_dict are not consistent")
     
     to_esft(base_model, adapter_config)
 

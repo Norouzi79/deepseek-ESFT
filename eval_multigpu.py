@@ -27,7 +27,13 @@ def infer_auto_device_map(model, pp_splits, visible_devices):
     return device_map
 
 
-def eval_model(rank, args, model, dataset):
+def eval_model(rank, args, dataset):
+    print("Loading base model...")
+    model = AutoModelForCausalLM.from_pretrained(args.base_model_path, trust_remote_code=True, torch_dtype=torch.bfloat16) # not using tokenizer here to aviod deadlock
+
+    print("Adding adapter...")
+    model = add_adapter(model, args.adapter_dir, return_original_states=False)
+
     config = {
         "max_new_tokens": args.max_new_tokens,
         "eval_batch_size": args.eval_batch_size,
@@ -78,15 +84,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
 
-
-    print("Loading base model...")
-    model = AutoModelForCausalLM.from_pretrained(args.base_model_path, trust_remote_code=True, torch_dtype=torch.bfloat16) # not using tokenizer here to aviod deadlock
-
     print(f"Running evaluation on {args.eval_dataset}...")
     dataset = [json.loads(i) for i in open(f"datasets/eval/{args.eval_dataset}.jsonl").readlines()]
 
-    print("Adding adapter...")
-    model = add_adapter(model, args.adapter_dir, return_original_states=False)
 
     print("Start Evaluating...")
-    mp.spawn(eval_model, args=(args, model, dataset), nprocs=args.world_size, join=True)
+    mp.spawn(eval_model, args=(args, dataset), nprocs=args.world_size, join=True)

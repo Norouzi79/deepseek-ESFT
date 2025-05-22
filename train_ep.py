@@ -13,7 +13,7 @@ from benchmarks import *
 from utils import get_formatted_input_and_target, get_examples_from_buffer_pad, init_parallel_groups
 from esft import to_esft
 from deepseek.modeling_deepseek import DeepseekV2ForCausalLM
-
+import time
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["NCCL_AVOID_RECORD_STREAMS"] = "1"
@@ -128,6 +128,115 @@ def main():
         data_collator=data_collator,
     )
 
+    original_save_model = trainer.save_model
+    def custom_save_model(self, output_dir=None, _internal_call=False):
+        if output_dir is None:
+            output_dir = self.args.output_dir
+            
+        # Ensure all ranks participate in saving
+        self._save(output_dir)
+        dist.barrier()
+        
+    trainer.save_model = MethodType(custom_save_model, trainer)
+
+    original_save = trainer._save
+    def custom_save(self, output_dir=None, state_dict=None):
+        ep_rank = ep_group.rank()
+        edp_rank = edp_group.rank()        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        if local_rank < ep_size and edp_rank == 0:
+            # Save expert model state
+            expert_state = {k: v for k, v in self.model.state_dict().items() if ".expert" in k}
+            expert_save_path = os.path.join(output_dir, f"expert_state_{ep_rank}.bin")
+            
+            # Save expert optimizer state using parameter names instead of ids
+            optimizer = self.optimizer
+            opt_state_dict = optimizer.state_dict()
+            
+            # Create a mapping from parameter id to parameter name
+            id_to_name = {}
+            for name, param in self.model.named_parameters():
+                if ".expert" in name:
+                    id_to_name[id(param)] = name
+            
+            # Get the mapping from optimizer state index to parameter
+            param_to_idx = {param: idx for idx, param in enumerate(optimizer.param_groups[0]['params'], 1)}
+            
+            # Save optimizer state using parameter names as keys
+            expert_opt_state = {'state': {}, 'param_groups': opt_state_dict['param_groups']}
+            for param, idx in param_to_idx.items():
+                if id(param) in id_to_name:
+                    param_name = id_to_name[id(param)]
+                    if idx in opt_state_dict['state']:
+                        expert_opt_state['state'][param_name] = opt_state_dict['state'][idx]
+            
+            expert_opt_path = os.path.join(output_dir, f"expert_optimizer_{ep_rank}.bin")
+            
+            # Save both states atomically
+            temp_expert_path = expert_save_path + ".tmp"
+            temp_opt_path = expert_opt_path + ".tmp"
+            torch.save(expert_state, temp_expert_path)
+            torch.save(expert_opt_state, temp_opt_path)
+            os.sync()
+            os.replace(temp_expert_path, expert_save_path)
+            os.replace(temp_opt_path, expert_opt_path)
+        
+        dist.barrier()
+            
+        if local_rank == 0:
+            original_state = self.model.state_dict()
+            optimizer_state = self.optimizer.state_dict()
+            
+            # Create a mapping from parameter name to optimizer index for the current session
+            name_to_idx = {}
+            for name, param in self.model.named_parameters():
+                if ".expert" in name:
+                    idx = next((i for i, p in enumerate(self.optimizer.param_groups[0]['params'], 1) if id(p) == id(param)), None)
+                    if idx is not None:
+                        name_to_idx[name] = idx
+            
+            time.sleep(1)
+            
+            for rank in range(1, ep_size):
+                expert_path = os.path.join(output_dir, f"expert_state_{rank}.bin")
+                opt_path = os.path.join(output_dir, f"expert_optimizer_{rank}.bin")
+                max_retries = 3
+                for retry in range(max_retries):
+                    try:
+                        expert_state = torch.load(expert_path)
+                        expert_opt_state = torch.load(opt_path)
+                        
+                        # Update model state
+                        original_state.update(expert_state)
+                        
+                        # Convert parameter names back to indices for the optimizer state
+                        for param_name, state in expert_opt_state['state'].items():
+                            if param_name in name_to_idx:
+                                idx = name_to_idx[param_name]
+                                optimizer_state['state'][idx] = state
+                            
+                        break
+                    except Exception as e:
+                        if retry == max_retries - 1:
+                            raise
+                        time.sleep(1)
+            
+            original_save(output_dir, state_dict=original_state)
+            # Save complete optimizer state
+            opt_save_path = os.path.join(output_dir, "optimizer.pt")
+            torch.save(optimizer_state, opt_save_path)
+            # remove those intermediate .bin files
+            for rank in range(1, ep_size):
+                os.remove(os.path.join(output_dir, f"expert_state_{rank}.bin"))
+                os.remove(os.path.join(output_dir, f"expert_optimizer_{rank}.bin"))
+        
+        dist.barrier()
+        tokenizer.save_pretrained(output_dir)
+
+    
+    trainer._save = MethodType(custom_save, trainer)
+
     accelerator = trainer.accelerator
     backward = accelerator.backward
     def custom_backward(self, loss, **kwargs):
@@ -141,19 +250,7 @@ def main():
                 p.grad = g
     accelerator.backward = MethodType(custom_backward, accelerator)
 
-    # Training
-    ckpt_path = f"{output_dir}/last_checkpoint_ep{local_rank}"
-    if os.path.exists(output_dir) and len(os.listdir(output_dir)) > 1: # has checkpoints already
-        trainer.train(resume_from_checkpoint=ckpt_path)
-    else:
-        trainer.train()
-
-    # Save the model and tokenizer
-    if local_rank == 0:
-        trainer.save_model(ckpt_path)
-        tokenizer.save_pretrained(ckpt_path)
-    elif local_rank < ep_size:
-        model.save_pretrained(ckpt_path)
+    trainer.train()
 
     print("Training complete")
 
