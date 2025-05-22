@@ -7,6 +7,7 @@ torchrun --nproc-per-node=8 train_ep.py \
     --base_model_path=${base_model_path} \
     --expert_config=results/expert_configs/intent.json \
     --train_dataset=intent \
+    --save_opt_states \
     --train_config=configs/base.yaml \
     --output_dir=results/checkpoints/${exp_name}
 

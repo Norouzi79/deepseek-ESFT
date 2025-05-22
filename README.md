@@ -92,10 +92,11 @@ python train.py \
     
 torchrun --nproc-per-node=8 train_ep.py \
     --base_model_path=deepseek-ai/ESFT-vanilla-lite \
-    --expert_config=results/expert_configs/translation.json \
-    --train_dataset=translation \
+    --expert_config=results/expert_configs/intent.json \
+    --train_dataset=intent \
+    --save_opt_states \
     --train_config=configs/base.yaml \
-    --output_dir=results/checkpoints/translation
+    --output_dir=results/checkpoints/test/eval_intent
 
 ```
 
